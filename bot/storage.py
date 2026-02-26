@@ -6,6 +6,8 @@ from pathlib import Path
 from time import time
 from uuid import uuid4
 
+_MEM_HISTORY_RETENTION_SECONDS = 45 * 24 * 60 * 60
+
 
 @dataclass(frozen=True)
 class GroupSettings:
@@ -224,13 +226,13 @@ def add_meme_history(chat_id: int, video_id: str, sent_at: int | None = None) ->
             (chat_id, video_id, timestamp),
         )
 
-        # Keep table compact: remove entries older than 2 days.
+        # Keep table compact but preserve at least monthly dedup window.
         conn.execute(
             """
             DELETE FROM meme_history
             WHERE sent_at < ?
             """,
-            (timestamp - 172800,),
+            (timestamp - _MEM_HISTORY_RETENTION_SECONDS,),
         )
 
 

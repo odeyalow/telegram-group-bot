@@ -9,7 +9,7 @@ import logging
 from pathlib import Path
 import re
 import secrets
-from random import choice
+from random import choice, randint
 from time import time
 from time import monotonic
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
@@ -45,7 +45,9 @@ logger = logging.getLogger(__name__)
 _GROUP_CHAT_TYPES = {"group", "supergroup"}
 _MODERATOR_PATTERN = re.compile(r"\bмодер(?:атор)?\b", re.IGNORECASE)
 _HASHTAG_MEME_PATTERN = re.compile(r"#(?:meme|мем)\b", re.IGNORECASE)
+_EM_PATTERN = re.compile(r"э+м+", re.IGNORECASE)
 _REPLY_SEEN_TTL_SECONDS = 15.0
+_MEM_HISTORY_WINDOW_SECONDS = 30 * 24 * 60 * 60
 _seen_reply_messages: dict[tuple[str, int, int], float] = {}
 _MEM_WAIT_RESPONSES = (
     "болд болд родной ка бр миныт",
@@ -55,8 +57,10 @@ _MEM_WAIT_RESPONSES = (
     "аааа мема захотелось",
 )
 _WHO_AM_I_TRIGGERS = {"алдик кто я", "алдик мен кммн"}
+_SAD_TRIGGERS_EXACT = {"алдик мен грусни", "алдик груснимн"}
 _ALDIK_NAME_TRIGGERS = {"алдик", "алдияр", "алдош", "алдок", "адиял", "одеяло"}
 _INSTA_USERNAMES = ("aramems", "wasteprod")
+_SAD_INSTA_USERNAME = "famouszayo"
 _INSTA_POSTS_ENDPOINT = "https://inflact.com/downloader/api/viewer/posts/"
 _INSTA_TOKEN_BLOCKS: tuple[tuple[int, ...], ...] = (
     (57, 100, 48, 54, 51, 60, 48, 102),
@@ -187,7 +191,18 @@ def _is_paroshka_trigger(normalized_text: str) -> bool:
     tokens = normalized_text.split()
     if not tokens:
         return False
-    return any(token.startswith("паршк") for token in tokens)
+    return any(token.startswith("паршк") or token in {"отн", "oтн"} for token in tokens)
+
+
+def _is_em_trigger(normalized_text: str) -> bool:
+    return bool(_EM_PATTERN.search(normalized_text))
+
+
+def _is_sad_trigger(normalized_text: str) -> bool:
+    if normalized_text in _SAD_TRIGGERS_EXACT:
+        return True
+    tokens = normalized_text.split()
+    return any(token.startswith("грусн") or token.startswith("грустн") for token in tokens)
 
 
 def _xor_with_index(text: str) -> str:
@@ -304,6 +319,53 @@ async def _download_photo_bytes(url: str, source_username: str = _INSTA_USERNAME
     return payload, filename
 
 
+async def _fetch_instagram_timeline_edges(username: str) -> list[dict]:
+    timeout = aiohttp.ClientTimeout(total=20)
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        **_build_insta_auth_headers(username),
+    }
+    form = aiohttp.FormData()
+    form.add_field("url", username)
+    form.add_field("cursor", "")
+
+    try:
+        async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+            async with session.post(_INSTA_POSTS_ENDPOINT, data=form) as response:
+                data = await response.json(content_type=None)
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+        return []
+
+    if not isinstance(data, dict) or data.get("status") != "success":
+        return []
+
+    payload = data.get("data") or {}
+    if not isinstance(payload, dict):
+        return []
+
+    posts = payload.get("posts") or {}
+    if not isinstance(posts, dict):
+        return []
+
+    posts_data = posts.get("data") or {}
+    if not isinstance(posts_data, dict):
+        return []
+
+    user = posts_data.get("user") or {}
+    if not isinstance(user, dict):
+        return []
+
+    timeline = user.get("edge_owner_to_timeline_media") or {}
+    if not isinstance(timeline, dict):
+        return []
+
+    edges = timeline.get("edges") or []
+    if not isinstance(edges, list):
+        return []
+
+    return [item for item in edges if isinstance(item, dict)]
+
+
 def _extract_insta_images_from_post(node: dict, source_username: str) -> list[dict[str, str]]:
     typename = str(node.get("__typename") or "").strip()
     post_id = str(node.get("id") or "").strip()
@@ -363,56 +425,103 @@ def _extract_insta_images_from_post(node: dict, source_username: str) -> list[di
     return images
 
 
+def _extract_instagram_post_media_candidates(node: dict, source_username: str) -> list[dict[str, str]]:
+    typename = str(node.get("__typename") or "").strip()
+    post_id = str(node.get("id") or "").strip()
+    shortcode = str(node.get("shortcode") or "").strip()
+    post_url = f"https://www.instagram.com/p/{shortcode}" if shortcode else ""
+    candidates: list[dict[str, str]] = []
+
+    if typename in {"GraphImage", "XDTGraphImage"}:
+        image = _normalize_insta_image_url(str(node.get("display_url") or ""))
+        if image:
+            media_id = post_id or hashlib.sha256(image.encode("utf-8")).hexdigest()[:24]
+            candidates.append(
+                {
+                    "post_id": f"insta_post:{source_username}:{media_id}",
+                    "media_type": "photo",
+                    "media_url": image,
+                    "post_url": post_url,
+                    "source_username": source_username,
+                }
+            )
+        return candidates
+
+    if typename in {"GraphVideo", "XDTGraphVideo"}:
+        video = str(node.get("video_url") or "").strip()
+        if video:
+            media_id = post_id or hashlib.sha256(video.encode("utf-8")).hexdigest()[:24]
+            candidates.append(
+                {
+                    "post_id": f"insta_post:{source_username}:{media_id}",
+                    "media_type": "video",
+                    "media_url": video,
+                    "post_url": post_url,
+                    "source_username": source_username,
+                }
+            )
+        return candidates
+
+    if typename not in {"GraphSidecar", "XDTGraphSidecar"}:
+        return candidates
+
+    sidecar = node.get("edge_sidecar_to_children") or {}
+    if not isinstance(sidecar, dict):
+        return candidates
+
+    edges = sidecar.get("edges") or []
+    if not isinstance(edges, list):
+        return candidates
+
+    for index, edge in enumerate(edges):
+        if not isinstance(edge, dict):
+            continue
+        child_node = edge.get("node") or {}
+        if not isinstance(child_node, dict):
+            continue
+
+        child_type = str(child_node.get("__typename") or "").strip()
+        child_id = str(child_node.get("id") or "").strip()
+
+        if child_type in {"GraphImage", "XDTGraphImage"}:
+            image = _normalize_insta_image_url(str(child_node.get("display_url") or ""))
+            if not image:
+                continue
+            media_id = child_id or post_id or f"img:{index}"
+            candidates.append(
+                {
+                    "post_id": f"insta_post:{source_username}:{media_id}",
+                    "media_type": "photo",
+                    "media_url": image,
+                    "post_url": post_url,
+                    "source_username": source_username,
+                }
+            )
+            continue
+
+        if child_type in {"GraphVideo", "XDTGraphVideo"}:
+            video = str(child_node.get("video_url") or "").strip()
+            if not video:
+                continue
+            media_id = child_id or post_id or f"vid:{index}"
+            candidates.append(
+                {
+                    "post_id": f"insta_post:{source_username}:{media_id}",
+                    "media_type": "video",
+                    "media_url": video,
+                    "post_url": post_url,
+                    "source_username": source_username,
+                }
+            )
+
+    return candidates
+
+
 async def _fetch_instagram_photo_candidates() -> list[dict[str, str]]:
-    timeout = aiohttp.ClientTimeout(total=20)
     unique_candidates: dict[str, dict[str, str]] = {}
 
     for username in _INSTA_USERNAMES:
-        headers = {
-            "User-Agent": "Mozilla/5.0",
-            **_build_insta_auth_headers(username),
-        }
-        form = aiohttp.FormData()
-        form.add_field("url", username)
-        form.add_field("cursor", "")
-
-        try:
-            async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
-                async with session.post(_INSTA_POSTS_ENDPOINT, data=form) as response:
-                    data = await response.json(content_type=None)
-        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
-            continue
-
-        if not isinstance(data, dict) or data.get("status") != "success":
-            continue
-
-        payload = data.get("data") or {}
-        if not isinstance(payload, dict):
-            continue
-
-        posts = payload.get("posts") or {}
-        if not isinstance(posts, dict):
-            continue
-
-        posts_data = posts.get("data") or {}
-        if not isinstance(posts_data, dict):
-            continue
-
-        user = posts_data.get("user") or {}
-        if not isinstance(user, dict):
-            continue
-
-        timeline = user.get("edge_owner_to_timeline_media") or {}
-        if not isinstance(timeline, dict):
-            continue
-
-        edges = timeline.get("edges") or []
-        if not isinstance(edges, list):
-            continue
-
-        for edge in edges:
-            if not isinstance(edge, dict):
-                continue
+        for edge in await _fetch_instagram_timeline_edges(username):
             node = edge.get("node") or {}
             if not isinstance(node, dict):
                 continue
@@ -430,6 +539,24 @@ async def _fetch_instagram_photo_candidates() -> list[dict[str, str]]:
                     "source_username": source_username,
                 }
 
+    return list(unique_candidates.values())
+
+
+async def _fetch_instagram_post_candidates(username: str) -> list[dict[str, str]]:
+    unique_candidates: dict[str, dict[str, str]] = {}
+    for edge in await _fetch_instagram_timeline_edges(username):
+        node = edge.get("node") or {}
+        if not isinstance(node, dict):
+            continue
+
+        for candidate in _extract_instagram_post_media_candidates(node, username):
+            post_id = str(candidate.get("post_id") or "").strip()
+            media_type = str(candidate.get("media_type") or "").strip()
+            media_url = str(candidate.get("media_url") or "").strip()
+            source_username = str(candidate.get("source_username") or "").strip()
+            if not post_id or not media_type or not media_url or not source_username:
+                continue
+            unique_candidates[post_id] = candidate
     return list(unique_candidates.values())
 
 
@@ -670,6 +797,8 @@ async def on_group_text(message: Message, bot: Bot) -> None:
     is_mem_photo_request = _is_mem_photo_request(normalized_text)
     is_mem_request = _is_mem_request(normalized_text)
     is_paroshka_trigger = _is_paroshka_trigger(normalized_text)
+    is_em_trigger = _is_em_trigger(normalized_text)
+    is_sad_trigger = _is_sad_trigger(normalized_text)
     is_who_am_i = normalized_text in _WHO_AM_I_TRIGGERS
     is_anon_link_request = _is_anon_link_request(normalized_text)
     is_aldik_name_trigger = _is_aldik_name_trigger(normalized_text)
@@ -679,6 +808,8 @@ async def on_group_text(message: Message, bot: Bot) -> None:
         is_mem_photo_request
         or is_mem_request
         or is_paroshka_trigger
+        or is_em_trigger
+        or is_sad_trigger
         or is_who_am_i
         or is_anon_link_request
         or is_aldik_name_trigger
@@ -692,6 +823,10 @@ async def on_group_text(message: Message, bot: Bot) -> None:
         kind = "mem_request"
     elif is_paroshka_trigger:
         kind = "paroshka_trigger"
+    elif is_em_trigger:
+        kind = "em_trigger"
+    elif is_sad_trigger:
+        kind = "sad_trigger"
     elif is_who_am_i:
         kind = "who_am_i"
     elif is_anon_link_request:
@@ -712,7 +847,7 @@ async def on_group_text(message: Message, bot: Bot) -> None:
         try:
             await message.reply(choice(_MEM_WAIT_RESPONSES))
 
-            since_ts = int(time()) - 43200
+            since_ts = int(time()) - _MEM_HISTORY_WINDOW_SECONDS
             recent_ids = get_recent_meme_video_ids(message.chat.id, since_ts)
             candidates = await _fetch_instagram_photo_candidates()
             fresh_candidates = [item for item in candidates if str(item.get("photo_id")) not in recent_ids]
@@ -757,7 +892,7 @@ async def on_group_text(message: Message, bot: Bot) -> None:
         try:
             await message.reply(choice(_MEM_WAIT_RESPONSES))
 
-            since_ts = int(time()) - 43200
+            since_ts = int(time()) - _MEM_HISTORY_WINDOW_SECONDS
             recent_ids = get_recent_meme_video_ids(message.chat.id, since_ts)
             candidates = await _fetch_popular_meme_candidates()
             fresh_candidates = [item for item in candidates if str(item.get("video_id")) not in recent_ids]
@@ -798,14 +933,78 @@ async def on_group_text(message: Message, bot: Bot) -> None:
             await message.reply("Ща не нашел мем, попробуй еще раз через пару секунд.")
             return
 
+    if is_sad_trigger:
+        try:
+            candidates = await _fetch_instagram_post_candidates(_SAD_INSTA_USERNAME)
+            if not candidates:
+                await message.reply("Ща не нашел мем, попробуй еще раз через пару секунд.")
+                return
+
+            pool = candidates[:]
+            while pool:
+                selected = choice(pool)
+                pool.remove(selected)
+
+                media_type = str(selected.get("media_type") or "").strip()
+                media_url = str(selected.get("media_url") or "").strip()
+                post_url = str(selected.get("post_url") or "").strip()
+                source_username = str(selected.get("source_username") or "").strip()
+                if not media_type or not media_url:
+                    continue
+
+                if media_type == "photo":
+                    try:
+                        downloaded = await _download_photo_bytes(
+                            media_url,
+                            source_username or _SAD_INSTA_USERNAME,
+                        )
+                        if downloaded is not None:
+                            photo_bytes, filename = downloaded
+                            await message.answer_photo(BufferedInputFile(photo_bytes, filename=filename))
+                            return
+                        await message.answer_photo(media_url)
+                        return
+                    except TelegramAPIError:
+                        if post_url:
+                            try:
+                                await message.answer(post_url)
+                                return
+                            except TelegramAPIError:
+                                pass
+                        continue
+
+                if media_type == "video":
+                    try:
+                        await message.answer_video(media_url)
+                        return
+                    except TelegramAPIError:
+                        if post_url:
+                            try:
+                                await message.answer(post_url)
+                                return
+                            except TelegramAPIError:
+                                pass
+                        continue
+
+            await message.reply("Ща не нашел мем, попробуй еще раз через пару секунд.")
+            return
+        except Exception:
+            logger.exception("Unexpected error while handling sad trigger request")
+            await message.reply("Ща не нашел мем, попробуй еще раз через пару секунд.")
+            return
+
     if is_paroshka_trigger:
         if _PAROSHKA_MEDIA_PATH is None:
             logger.warning("parochka media file was not found in %s", _GIFS_DIR)
             return
         try:
-            await message.answer_animation(FSInputFile(_PAROSHKA_MEDIA_PATH))
+            await message.reply_animation(FSInputFile(_PAROSHKA_MEDIA_PATH))
         except TelegramAPIError:
             logger.exception("Failed to send paroshka animation")
+        return
+
+    if is_em_trigger:
+        await message.reply("э" * randint(1, 10) + "м" * randint(1, 10))
         return
 
     if is_who_am_i:
