@@ -49,17 +49,26 @@ _EM_PATTERN = re.compile(r"э+м+", re.IGNORECASE)
 _REPLY_SEEN_TTL_SECONDS = 15.0
 _MEM_HISTORY_WINDOW_SECONDS = 30 * 24 * 60 * 60
 _seen_reply_messages: dict[tuple[str, int, int], float] = {}
+_yeuoia_reply_state: dict[tuple[int, int], tuple[int, int, float]] = {}
 _MEM_WAIT_RESPONSES = (
     "болд болд родной ка бр миныт",
     "зяныыыым каз жберем",
     "ка кут",
     "жди",
-    "аааа мема захотелось",
+    "аааа смешного захотелось",
+    "щя",
+    "щясс",
+    "ка жберлп жатр родной",
+    "айтсан болдго",
+    "чекай",
+    "оп вот смешного чутка",
 )
 _PR_TRIGGERS = {"пр", "привет"}
 _WHO_AM_I_TRIGGERS = {"алдик кто я", "алдик мен кммн"}
-_SAD_TRIGGERS_EXACT = {"алдик мен грусни", "алдик груснимн"}
+_SAD_TRIGGERS_EXACT = {"алдик мен грусни", "алдик мен груснимн", "алдик груснимн"}
 _ALDIK_NAME_TRIGGERS = {"алдик", "алдияр", "алдош", "алдок", "адиял", "одеяло"}
+_YEUOIA_USERNAME = "yeuoia"
+_YEUOIA_REPLY_STATE_TTL_SECONDS = 24 * 60 * 60
 _INSTA_USERNAMES = ("aramems", "wasteprod")
 _SAD_INSTA_USERNAME = "famouszayo"
 _INSTA_POSTS_ENDPOINT = "https://inflact.com/downloader/api/viewer/posts/"
@@ -128,6 +137,30 @@ _PR_RESPONSES = (
     "салеееем",
     "самбердк",
     "приветики",
+)
+_YEUOIA_RESPONSES = (
+    "Ернар кетп калш",
+    "Ернар жапшы аузынды",
+    "Сглп кетш пж",
+    "Мал",
+    "Чорт",
+    "жапшы аузнды",
+    "ЖАПШЫ АУЗНДЫ ПЖ",
+    "Ернар, сены ешкм естыгысы келп турган жок",
+    "Жогалш",
+    "Асыла салш хусним",
+    "Гнида",
+    "Мудак",
+    "Тварь",
+    "Мразь",
+    "Закрой свой вонючий рот щенок",
+)
+_YEUOIA_RESPONSE_LOOKUP = {item.casefold() for item in _YEUOIA_RESPONSES}
+_SAD_RESPONSES = (
+    "Тууу ненадо ато мен тоже грусни",
+    "Бомаш грусни",
+    "Грусни грусни видо жберем тагда",
+    "Ну плачь а то я тоже заплачууу",
 )
 
 
@@ -219,6 +252,45 @@ def _is_sad_trigger(normalized_text: str) -> bool:
 def _is_pr_trigger(normalized_text: str) -> bool:
     tokens = normalized_text.split()
     return any(token in _PR_TRIGGERS for token in tokens)
+
+
+def _is_yeuoia_user(message: Message) -> bool:
+    username = (message.from_user.username if message.from_user else "") or ""
+    return username.casefold() == _YEUOIA_USERNAME
+
+
+def _is_reply_to_yeuoia_bot_phrase(message: Message, bot: Bot) -> bool:
+    reply = message.reply_to_message
+    if reply is None or reply.from_user is None:
+        return False
+    if not reply.from_user.is_bot or reply.from_user.id != bot.id:
+        return False
+
+    reply_text = (reply.text or reply.caption or "").strip().casefold()
+    if not reply_text:
+        return False
+    return reply_text in _YEUOIA_RESPONSE_LOOKUP
+
+
+def _should_reply_to_yeuoia(chat_id: int, user_id: int, force: bool) -> bool:
+    now = monotonic()
+    for key, (_, _, seen_at) in tuple(_yeuoia_reply_state.items()):
+        if now - seen_at > _YEUOIA_REPLY_STATE_TTL_SECONDS:
+            _yeuoia_reply_state.pop(key, None)
+
+    key = (chat_id, user_id)
+    count, target, _ = _yeuoia_reply_state.get(key, (0, randint(2, 4), now))
+    if force:
+        _yeuoia_reply_state[key] = (0, randint(2, 4), now)
+        return True
+
+    count += 1
+    if count >= target:
+        _yeuoia_reply_state[key] = (0, randint(2, 4), now)
+        return True
+
+    _yeuoia_reply_state[key] = (count, target, now)
+    return False
 
 
 def _xor_with_index(text: str) -> str:
@@ -816,12 +888,13 @@ async def on_group_text(message: Message, bot: Bot) -> None:
     is_em_trigger = _is_em_trigger(normalized_text)
     is_sad_trigger = _is_sad_trigger(normalized_text)
     is_pr_trigger = _is_pr_trigger(normalized_text)
+    is_yeuoia_user = _is_yeuoia_user(message)
+    is_yeuoia_force_reply = is_yeuoia_user and _is_reply_to_yeuoia_bot_phrase(message, bot)
     is_who_am_i = normalized_text in _WHO_AM_I_TRIGGERS
     is_anon_link_request = _is_anon_link_request(normalized_text)
     is_aldik_name_trigger = _is_aldik_name_trigger(normalized_text)
     is_moderator_word = bool(_MODERATOR_PATTERN.search(text))
-
-    if not (
+    has_regular_trigger = (
         is_mem_photo_request
         or is_mem_request
         or is_paroshka_trigger
@@ -832,7 +905,9 @@ async def on_group_text(message: Message, bot: Bot) -> None:
         or is_anon_link_request
         or is_aldik_name_trigger
         or is_moderator_word
-    ):
+    )
+
+    if not has_regular_trigger and not is_yeuoia_user:
         return
 
     if is_mem_photo_request:
@@ -853,6 +928,8 @@ async def on_group_text(message: Message, bot: Bot) -> None:
         kind = "anon_link_text"
     elif is_aldik_name_trigger:
         kind = "aldik_name"
+    elif is_yeuoia_user:
+        kind = "yeuoia_user"
     else:
         kind = "moderator_word"
 
@@ -861,6 +938,21 @@ async def on_group_text(message: Message, bot: Bot) -> None:
 
     settings = ensure_group(message.chat.id, message.chat.title or "")
     if not settings.bot_enabled:
+        return
+
+    should_reply_to_yeuoia = False
+    if is_yeuoia_user and message.from_user:
+        should_reply_to_yeuoia = _should_reply_to_yeuoia(
+            message.chat.id,
+            message.from_user.id,
+            force=is_yeuoia_force_reply,
+        )
+
+    if should_reply_to_yeuoia:
+        await message.reply(choice(_YEUOIA_RESPONSES))
+        return
+
+    if not has_regular_trigger:
         return
 
     if is_mem_photo_request:
@@ -955,6 +1047,9 @@ async def on_group_text(message: Message, bot: Bot) -> None:
 
     if is_sad_trigger:
         try:
+            if normalized_text in _SAD_TRIGGERS_EXACT:
+                await message.reply(choice(_SAD_RESPONSES))
+
             candidates = await _fetch_instagram_post_candidates(_SAD_INSTA_USERNAME)
             if not candidates:
                 await message.reply("Ща не нашел мем, попробуй еще раз через пару секунд.")
