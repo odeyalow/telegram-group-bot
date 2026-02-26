@@ -65,6 +65,7 @@ _MEM_WAIT_RESPONSES = (
     "оп вот смешного чутка",
 )
 _PR_TRIGGERS = {"пр", "привет"}
+_DO_IT_TRIGGER = "алдик делт неделт"
 _WHO_AM_I_TRIGGERS = {"алдик кто я", "алдик мен кммн"}
 _SAD_TRIGGERS_EXACT = {"алдик мен грусни", "алдик мен груснимн", "алдик груснимн"}
 _ALDIK_NAME_TRIGGERS = {"алдик", "алдияр", "алдош", "алдок", "адиял", "одеяло"}
@@ -140,6 +141,23 @@ _PR_RESPONSES = (
     "салеееем",
     "самбердк",
     "приветики",
+)
+_DO_IT_RESPONSES = (
+    "да",
+    "нет",
+    "нууу мб",
+    "жб",
+    "Делаешь",
+    "ДЕЛАЙ",
+    "алдик говорит да",
+    "алдик говорит нет",
+    "нееее",
+    "ДАДАДА",
+    "еще спрашиваешь? Делай кнч",
+    "кнч",
+    "ДАУАЙ БАЛЯ",
+    "ага",
+    "смело",
 )
 _YEUOIA_RESPONSES = (
     "Ернар кетп калш",
@@ -300,10 +318,10 @@ def _should_send_otn_paroshka(chat_id: int) -> bool:
         if now - seen_at > _OTN_PAROSHKA_STATE_TTL_SECONDS:
             _otn_paroshka_state.pop(key, None)
 
-    count, target, _ = _otn_paroshka_state.get(chat_id, (0, randint(2, 3), now))
+    count, target, _ = _otn_paroshka_state.get(chat_id, (0, randint(10, 15), now))
     count += 1
     if count >= target:
-        _otn_paroshka_state[chat_id] = (0, randint(2, 3), now)
+        _otn_paroshka_state[chat_id] = (0, randint(10, 15), now)
         return True
 
     _otn_paroshka_state[chat_id] = (count, target, now)
@@ -906,6 +924,7 @@ async def on_group_text(message: Message, bot: Bot) -> None:
     is_em_trigger = _is_em_trigger(normalized_text)
     is_sad_trigger = _is_sad_trigger(normalized_text)
     is_pr_trigger = _is_pr_trigger(normalized_text)
+    is_do_it_trigger = normalized_text == _DO_IT_TRIGGER
     is_yeuoia_reply_to_odeyalow = _is_yeuoia_reply_to_odeyalow(message)
     is_who_am_i = normalized_text in _WHO_AM_I_TRIGGERS
     is_anon_link_request = _is_anon_link_request(normalized_text)
@@ -918,6 +937,7 @@ async def on_group_text(message: Message, bot: Bot) -> None:
         or is_em_trigger
         or is_sad_trigger
         or is_pr_trigger
+        or is_do_it_trigger
         or is_who_am_i
         or is_anon_link_request
         or is_aldik_name_trigger
@@ -939,6 +959,8 @@ async def on_group_text(message: Message, bot: Bot) -> None:
         kind = "sad_trigger"
     elif is_pr_trigger:
         kind = "pr_trigger"
+    elif is_do_it_trigger:
+        kind = "do_it_trigger"
     elif is_who_am_i:
         kind = "who_am_i"
     elif is_anon_link_request:
@@ -1146,6 +1168,10 @@ async def on_group_text(message: Message, bot: Bot) -> None:
 
     if is_pr_trigger:
         await message.reply(choice(_PR_RESPONSES))
+        return
+
+    if is_do_it_trigger:
+        await message.reply(choice(_DO_IT_RESPONSES))
         return
 
     if is_anon_link_request:
