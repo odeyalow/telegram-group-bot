@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import logging
+from pathlib import Path
 import re
 import secrets
 from random import choice
@@ -19,7 +20,7 @@ from aiogram import Bot, F, Router
 from aiogram.enums import ChatMemberStatus
 from aiogram.filters import Command
 from aiogram.exceptions import TelegramAPIError
-from aiogram.types import BufferedInputFile, ChatMemberUpdated, Message
+from aiogram.types import BufferedInputFile, ChatMemberUpdated, FSInputFile, Message
 from aiogram.utils.deep_linking import create_start_link
 
 from bot.storage import (
@@ -69,6 +70,15 @@ _INSTA_TOKEN_BLOCKS: tuple[tuple[int, ...], ...] = (
     (100, 101, 97, 55, 103, 51, 54, 97),
 )
 _INSTA_CLIENT_ID = secrets.token_hex(16)
+_GIFS_DIR = Path(__file__).resolve().parents[1] / "gifs"
+_PAROSHKA_MEDIA_PATH = next(
+    (
+        item
+        for item in (_GIFS_DIR.iterdir() if _GIFS_DIR.exists() else ())
+        if item.is_file() and item.stem.casefold() == "parochka"
+    ),
+    None,
+)
 _WHO_AM_I_RESPONSES = (
     "Ты рот закрой",
     "Сен прыщан андай типо ысыып жара жара болп жаткан",
@@ -151,8 +161,11 @@ def _is_mem_request(normalized_text: str) -> bool:
         return False
 
     has_aldik_name = any(token in _ALDIK_NAME_TRIGGERS for token in tokens)
-    has_mem_word = any(token.startswith("мем") or token == "meme" for token in tokens)
-    return has_aldik_name and has_mem_word
+    has_video_word = any(
+        token.startswith("видо") or token.startswith("видео") or token == "video"
+        for token in tokens
+    )
+    return has_aldik_name and has_video_word
 
 
 def _is_mem_photo_request(normalized_text: str) -> bool:
@@ -161,12 +174,21 @@ def _is_mem_photo_request(normalized_text: str) -> bool:
         return False
 
     has_aldik_name = any(token in _ALDIK_NAME_TRIGGERS for token in tokens)
-    has_mem_word = any(token.startswith("мем") or token == "meme" for token in tokens)
     has_photo_word = any(
-        token.startswith("фото") or token.startswith("фотк") or token == "photo"
+        token.startswith("пото")
+        or token.startswith("фото")
+        or token.startswith("фотк")
+        or token == "photo"
         for token in tokens
     )
-    return has_aldik_name and has_mem_word and has_photo_word
+    return has_aldik_name and has_photo_word
+
+
+def _is_paroshka_trigger(normalized_text: str) -> bool:
+    tokens = normalized_text.split()
+    if not tokens:
+        return False
+    return any(token.startswith("паршк") for token in tokens)
 
 
 def _xor_with_index(text: str) -> str:
@@ -626,6 +648,7 @@ async def on_group_text(message: Message, bot: Bot) -> None:
     normalized_text = _normalize_text(text)
     is_mem_photo_request = _is_mem_photo_request(normalized_text)
     is_mem_request = _is_mem_request(normalized_text)
+    is_paroshka_trigger = _is_paroshka_trigger(normalized_text)
     is_who_am_i = normalized_text in _WHO_AM_I_TRIGGERS
     is_anon_link_request = _is_anon_link_request(normalized_text)
     is_aldik_name_trigger = _is_aldik_name_trigger(normalized_text)
@@ -634,6 +657,7 @@ async def on_group_text(message: Message, bot: Bot) -> None:
     if not (
         is_mem_photo_request
         or is_mem_request
+        or is_paroshka_trigger
         or is_who_am_i
         or is_anon_link_request
         or is_aldik_name_trigger
@@ -645,6 +669,8 @@ async def on_group_text(message: Message, bot: Bot) -> None:
         kind = "mem_photo_request"
     elif is_mem_request:
         kind = "mem_request"
+    elif is_paroshka_trigger:
+        kind = "paroshka_trigger"
     elif is_who_am_i:
         kind = "who_am_i"
     elif is_anon_link_request:
@@ -747,6 +773,16 @@ async def on_group_text(message: Message, bot: Bot) -> None:
             logger.exception("Unexpected error while handling meme video request")
             await message.reply("Ща не нашел мем, попробуй еще раз через пару секунд.")
             return
+
+    if is_paroshka_trigger:
+        if _PAROSHKA_MEDIA_PATH is None:
+            logger.warning("parochka media file was not found in %s", _GIFS_DIR)
+            return
+        try:
+            await message.answer_animation(FSInputFile(_PAROSHKA_MEDIA_PATH))
+        except TelegramAPIError:
+            logger.exception("Failed to send paroshka animation")
+        return
 
     if is_who_am_i:
         await message.reply(choice(_WHO_AM_I_RESPONSES))
