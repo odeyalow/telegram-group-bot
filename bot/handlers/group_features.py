@@ -96,6 +96,15 @@ _PAROSHKA_MEDIA_PATH = next(
     ),
     None,
 )
+_VOICE_DIR = Path(__file__).resolve().parents[1] / "voice"
+_MODERATOR_VOICE_PATH = next(
+    (
+        item
+        for item in (_VOICE_DIR.iterdir() if _VOICE_DIR.exists() else ())
+        if item.is_file() and item.stem.casefold() == "moderator"
+    ),
+    None,
+)
 _WHO_AM_I_RESPONSES = (
     "Ты рот закрой",
     "Сен прыщан андай типо ысыып жара жара болп жаткан",
@@ -1182,4 +1191,11 @@ async def on_group_text(message: Message, bot: Bot) -> None:
         await message.reply(choice(ALDIK_NAME_RESPONSES))
         return
 
-    await message.answer(MODERATOR_TRIGGER_TEXT)
+    if _MODERATOR_VOICE_PATH is not None and randint(0, 1) == 1:
+        try:
+            await message.reply_voice(FSInputFile(_MODERATOR_VOICE_PATH))
+            return
+        except TelegramAPIError:
+            logger.exception("Failed to send moderator voice message")
+
+    await message.reply(MODERATOR_TRIGGER_TEXT)
