@@ -50,6 +50,7 @@ _REPLY_SEEN_TTL_SECONDS = 15.0
 _MEM_HISTORY_WINDOW_SECONDS = 30 * 24 * 60 * 60
 _seen_reply_messages: dict[tuple[str, int, int], float] = {}
 _yeuoia_reply_state: dict[tuple[int, int], tuple[int, int, float]] = {}
+_otn_paroshka_state: dict[int, tuple[int, int, float]] = {}
 _MEM_WAIT_RESPONSES = (
     "болд болд родной ка бр миныт",
     "зяныыыым каз жберем",
@@ -69,6 +70,7 @@ _SAD_TRIGGERS_EXACT = {"алдик мен грусни", "алдик мен гр
 _ALDIK_NAME_TRIGGERS = {"алдик", "алдияр", "алдош", "алдок", "адиял", "одеяло"}
 _YEUOIA_USERNAME = "yeuoia"
 _YEUOIA_REPLY_STATE_TTL_SECONDS = 24 * 60 * 60
+_OTN_PAROSHKA_STATE_TTL_SECONDS = 24 * 60 * 60
 _INSTA_USERNAMES = ("aramems", "wasteprod")
 _SAD_INSTA_USERNAME = "famouszayo"
 _INSTA_POSTS_ENDPOINT = "https://inflact.com/downloader/api/viewer/posts/"
@@ -238,6 +240,11 @@ def _is_paroshka_trigger(normalized_text: str) -> bool:
     return any(token.startswith("паршк") or token in {"отн", "oтн"} for token in tokens)
 
 
+def _is_otn_trigger(normalized_text: str) -> bool:
+    tokens = normalized_text.split()
+    return any(token in {"отн", "oтн"} for token in tokens)
+
+
 def _is_em_trigger(normalized_text: str) -> bool:
     return bool(_EM_PATTERN.search(normalized_text))
 
@@ -290,6 +297,22 @@ def _should_reply_to_yeuoia(chat_id: int, user_id: int, force: bool) -> bool:
         return True
 
     _yeuoia_reply_state[key] = (count, target, now)
+    return False
+
+
+def _should_send_otn_paroshka(chat_id: int) -> bool:
+    now = monotonic()
+    for key, (_, _, seen_at) in tuple(_otn_paroshka_state.items()):
+        if now - seen_at > _OTN_PAROSHKA_STATE_TTL_SECONDS:
+            _otn_paroshka_state.pop(key, None)
+
+    count, target, _ = _otn_paroshka_state.get(chat_id, (0, randint(2, 3), now))
+    count += 1
+    if count >= target:
+        _otn_paroshka_state[chat_id] = (0, randint(2, 3), now)
+        return True
+
+    _otn_paroshka_state[chat_id] = (count, target, now)
     return False
 
 
@@ -885,6 +908,7 @@ async def on_group_text(message: Message, bot: Bot) -> None:
     is_mem_photo_request = _is_mem_photo_request(normalized_text)
     is_mem_request = _is_mem_request(normalized_text)
     is_paroshka_trigger = _is_paroshka_trigger(normalized_text)
+    is_otn_trigger = _is_otn_trigger(normalized_text)
     is_em_trigger = _is_em_trigger(normalized_text)
     is_sad_trigger = _is_sad_trigger(normalized_text)
     is_pr_trigger = _is_pr_trigger(normalized_text)
@@ -1109,6 +1133,8 @@ async def on_group_text(message: Message, bot: Bot) -> None:
             return
 
     if is_paroshka_trigger:
+        if is_otn_trigger and not _should_send_otn_paroshka(message.chat.id):
+            return
         if _PAROSHKA_MEDIA_PATH is None:
             logger.warning("parochka media file was not found in %s", _GIFS_DIR)
             return
