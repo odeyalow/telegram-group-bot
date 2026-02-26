@@ -56,6 +56,7 @@ _MEM_WAIT_RESPONSES = (
     "жди",
     "аааа мема захотелось",
 )
+_PR_TRIGGERS = {"пр", "привет"}
 _WHO_AM_I_TRIGGERS = {"алдик кто я", "алдик мен кммн"}
 _SAD_TRIGGERS_EXACT = {"алдик мен грусни", "алдик груснимн"}
 _ALDIK_NAME_TRIGGERS = {"алдик", "алдияр", "алдош", "алдок", "адиял", "одеяло"}
@@ -117,6 +118,16 @@ _WHO_AM_I_RESPONSES = (
     "Менын зайченогм",
     "Котигм сол",
     "Люблююю люблю тебя",
+)
+_PR_RESPONSES = (
+    "пр",
+    "прибет",
+    "пр кд чд",
+    "пр пр",
+    "салам попалам",
+    "салеееем",
+    "самбердк",
+    "приветики",
 )
 
 
@@ -203,6 +214,11 @@ def _is_sad_trigger(normalized_text: str) -> bool:
         return True
     tokens = normalized_text.split()
     return any(token.startswith("грусн") or token.startswith("грустн") for token in tokens)
+
+
+def _is_pr_trigger(normalized_text: str) -> bool:
+    tokens = normalized_text.split()
+    return any(token in _PR_TRIGGERS for token in tokens)
 
 
 def _xor_with_index(text: str) -> str:
@@ -799,6 +815,7 @@ async def on_group_text(message: Message, bot: Bot) -> None:
     is_paroshka_trigger = _is_paroshka_trigger(normalized_text)
     is_em_trigger = _is_em_trigger(normalized_text)
     is_sad_trigger = _is_sad_trigger(normalized_text)
+    is_pr_trigger = _is_pr_trigger(normalized_text)
     is_who_am_i = normalized_text in _WHO_AM_I_TRIGGERS
     is_anon_link_request = _is_anon_link_request(normalized_text)
     is_aldik_name_trigger = _is_aldik_name_trigger(normalized_text)
@@ -810,6 +827,7 @@ async def on_group_text(message: Message, bot: Bot) -> None:
         or is_paroshka_trigger
         or is_em_trigger
         or is_sad_trigger
+        or is_pr_trigger
         or is_who_am_i
         or is_anon_link_request
         or is_aldik_name_trigger
@@ -827,6 +845,8 @@ async def on_group_text(message: Message, bot: Bot) -> None:
         kind = "em_trigger"
     elif is_sad_trigger:
         kind = "sad_trigger"
+    elif is_pr_trigger:
+        kind = "pr_trigger"
     elif is_who_am_i:
         kind = "who_am_i"
     elif is_anon_link_request:
@@ -1009,6 +1029,10 @@ async def on_group_text(message: Message, bot: Bot) -> None:
 
     if is_who_am_i:
         await message.reply(choice(_WHO_AM_I_RESPONSES))
+        return
+
+    if is_pr_trigger:
+        await message.reply(choice(_PR_RESPONSES))
         return
 
     if is_anon_link_request:
