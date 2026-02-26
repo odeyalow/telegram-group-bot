@@ -636,14 +636,12 @@ async def on_bot_added(event: ChatMemberUpdated, bot: Bot) -> None:
         await bot.send_message(event.chat.id, BOT_JOIN_TEXT)
 
 
-@router.message(F.chat.type.in_(_GROUP_CHAT_TYPES), F.text)
+@router.message(F.chat.type.in_(_GROUP_CHAT_TYPES), F.text, ~F.text.startswith("/"))
 async def on_group_text(message: Message, bot: Bot) -> None:
     if not message.from_user or message.from_user.is_bot:
         return
 
     text = message.text or ""
-    if text.startswith("/"):
-        return
 
     normalized_text = _normalize_text(text)
     is_mem_photo_request = _is_mem_photo_request(normalized_text)
