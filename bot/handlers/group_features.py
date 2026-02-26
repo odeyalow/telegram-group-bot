@@ -56,9 +56,8 @@ _MEM_WAIT_RESPONSES = (
 )
 _WHO_AM_I_TRIGGERS = {"алдик кто я", "алдик мен кммн"}
 _ALDIK_NAME_TRIGGERS = {"алдик", "алдияр", "алдош", "алдок", "адиял", "одеяло"}
-_INSTA_USERNAME = "aramems"
+_INSTA_USERNAMES = ("aramems", "wasteprod")
 _INSTA_POSTS_ENDPOINT = "https://inflact.com/downloader/api/viewer/posts/"
-_INSTA_REFERER_URL = f"https://inflact.com/profiles/instagram/{_INSTA_USERNAME}/"
 _INSTA_TOKEN_BLOCKS: tuple[tuple[int, ...], ...] = (
     (57, 100, 48, 54, 51, 60, 48, 102),
     (98, 53, 59, 55, 51, 100, 103, 100),
@@ -206,7 +205,11 @@ def _build_insta_secret_key() -> str:
     return "".join(parts)
 
 
-def _build_insta_auth_headers() -> dict[str, str]:
+def _insta_referer_url(username: str) -> str:
+    return f"https://inflact.com/profiles/instagram/{username}/"
+
+
+def _build_insta_auth_headers(username: str) -> dict[str, str]:
     payload = {
         "timestamp": int(time()),
         "clientId": _INSTA_CLIENT_ID,
@@ -222,7 +225,7 @@ def _build_insta_auth_headers() -> dict[str, str]:
     return {
         "X-Client-Token": token,
         "X-Client-Signature": signature,
-        "Referer": _INSTA_REFERER_URL,
+        "Referer": _insta_referer_url(username),
     }
 
 
@@ -274,11 +277,11 @@ def _guess_image_filename(url: str, content_type: str) -> str:
     return f"meme_photo{ext}"
 
 
-async def _download_photo_bytes(url: str) -> tuple[bytes, str] | None:
+async def _download_photo_bytes(url: str, source_username: str = _INSTA_USERNAMES[0]) -> tuple[bytes, str] | None:
     timeout = aiohttp.ClientTimeout(total=20)
     headers = {
         "User-Agent": "Mozilla/5.0",
-        "Referer": _INSTA_REFERER_URL,
+        "Referer": _insta_referer_url(source_username),
     }
     try:
         async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
@@ -301,7 +304,7 @@ async def _download_photo_bytes(url: str) -> tuple[bytes, str] | None:
     return payload, filename
 
 
-def _extract_insta_images_from_post(node: dict) -> list[dict[str, str]]:
+def _extract_insta_images_from_post(node: dict, source_username: str) -> list[dict[str, str]]:
     typename = str(node.get("__typename") or "").strip()
     post_id = str(node.get("id") or "").strip()
     if typename in {"GraphImage", "XDTGraphImage"}:
@@ -309,7 +312,13 @@ def _extract_insta_images_from_post(node: dict) -> list[dict[str, str]]:
         if not image:
             return []
         media_id = post_id or hashlib.sha256(image.encode("utf-8")).hexdigest()[:24]
-        return [{"photo_id": f"insta_photo:{media_id}", "photo_url": image}]
+        return [
+            {
+                "photo_id": f"insta_photo:{source_username}:{media_id}",
+                "photo_url": image,
+                "source_username": source_username,
+            }
+        ]
 
     if typename not in {"GraphSidecar", "XDTGraphSidecar"}:
         return []
@@ -343,71 +352,85 @@ def _extract_insta_images_from_post(node: dict) -> list[dict[str, str]]:
         if not child_id and not post_id:
             media_id = hashlib.sha256(f"{index}:{image}".encode("utf-8")).hexdigest()[:24]
 
-        images.append({"photo_id": f"insta_photo:{media_id}", "photo_url": image})
+        images.append(
+            {
+                "photo_id": f"insta_photo:{source_username}:{media_id}",
+                "photo_url": image,
+                "source_username": source_username,
+            }
+        )
 
     return images
 
 
 async def _fetch_instagram_photo_candidates() -> list[dict[str, str]]:
     timeout = aiohttp.ClientTimeout(total=20)
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        **_build_insta_auth_headers(),
-    }
-    form = aiohttp.FormData()
-    form.add_field("url", _INSTA_USERNAME)
-    form.add_field("cursor", "")
+    unique_candidates: dict[str, dict[str, str]] = {}
 
-    try:
-        async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
-            async with session.post(_INSTA_POSTS_ENDPOINT, data=form) as response:
-                data = await response.json(content_type=None)
-    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
-        return []
+    for username in _INSTA_USERNAMES:
+        headers = {
+            "User-Agent": "Mozilla/5.0",
+            **_build_insta_auth_headers(username),
+        }
+        form = aiohttp.FormData()
+        form.add_field("url", username)
+        form.add_field("cursor", "")
 
-    if not isinstance(data, dict) or data.get("status") != "success":
-        return []
-
-    payload = data.get("data") or {}
-    if not isinstance(payload, dict):
-        return []
-
-    posts = payload.get("posts") or {}
-    if not isinstance(posts, dict):
-        return []
-
-    posts_data = posts.get("data") or {}
-    if not isinstance(posts_data, dict):
-        return []
-
-    user = posts_data.get("user") or {}
-    if not isinstance(user, dict):
-        return []
-
-    timeline = user.get("edge_owner_to_timeline_media") or {}
-    if not isinstance(timeline, dict):
-        return []
-
-    edges = timeline.get("edges") or []
-    if not isinstance(edges, list):
-        return []
-
-    unique_candidates: dict[str, str] = {}
-    for edge in edges:
-        if not isinstance(edge, dict):
-            continue
-        node = edge.get("node") or {}
-        if not isinstance(node, dict):
+        try:
+            async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+                async with session.post(_INSTA_POSTS_ENDPOINT, data=form) as response:
+                    data = await response.json(content_type=None)
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
             continue
 
-        images = _extract_insta_images_from_post(node)
-        for image_info in images:
-            photo_id = str(image_info.get("photo_id") or "").strip()
-            photo_url = str(image_info.get("photo_url") or "").strip()
-            if photo_id and photo_url:
-                unique_candidates[photo_id] = photo_url
+        if not isinstance(data, dict) or data.get("status") != "success":
+            continue
 
-    return [{"photo_id": key, "photo_url": value} for key, value in unique_candidates.items()]
+        payload = data.get("data") or {}
+        if not isinstance(payload, dict):
+            continue
+
+        posts = payload.get("posts") or {}
+        if not isinstance(posts, dict):
+            continue
+
+        posts_data = posts.get("data") or {}
+        if not isinstance(posts_data, dict):
+            continue
+
+        user = posts_data.get("user") or {}
+        if not isinstance(user, dict):
+            continue
+
+        timeline = user.get("edge_owner_to_timeline_media") or {}
+        if not isinstance(timeline, dict):
+            continue
+
+        edges = timeline.get("edges") or []
+        if not isinstance(edges, list):
+            continue
+
+        for edge in edges:
+            if not isinstance(edge, dict):
+                continue
+            node = edge.get("node") or {}
+            if not isinstance(node, dict):
+                continue
+
+            images = _extract_insta_images_from_post(node, username)
+            for image_info in images:
+                photo_id = str(image_info.get("photo_id") or "").strip()
+                photo_url = str(image_info.get("photo_url") or "").strip()
+                source_username = str(image_info.get("source_username") or "").strip()
+                if not photo_id or not photo_url or not source_username:
+                    continue
+                unique_candidates[photo_id] = {
+                    "photo_id": photo_id,
+                    "photo_url": photo_url,
+                    "source_username": source_username,
+                }
+
+    return list(unique_candidates.values())
 
 
 def _extract_tikwm_videos(data: object) -> list[dict]:
@@ -705,11 +728,14 @@ async def on_group_text(message: Message, bot: Bot) -> None:
 
                 photo_id = str(selected.get("photo_id") or "").strip()
                 photo_url = str(selected.get("photo_url") or "").strip()
+                source_username = str(selected.get("source_username") or "").strip()
                 if not photo_id or not photo_url:
                     continue
+                if not source_username:
+                    source_username = _INSTA_USERNAMES[0]
 
                 try:
-                    downloaded = await _download_photo_bytes(photo_url)
+                    downloaded = await _download_photo_bytes(photo_url, source_username)
                     if downloaded is not None:
                         photo_bytes, filename = downloaded
                         await message.answer_photo(BufferedInputFile(photo_bytes, filename=filename))
