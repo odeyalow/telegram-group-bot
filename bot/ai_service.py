@@ -30,6 +30,19 @@ _AI_VOCAB = (
     "рот закрой",
     "щенок",
 )
+_NON_TARGET_MARKERS = (
+    "эмне",
+    "жана",
+    "болот",
+    "кылам",
+    "кыл",
+    "сураныч",
+    "nima",
+    "rahmat",
+    "yaxshi",
+    "qalesan",
+    "bo ladi",
+)
 
 
 def get_ollama_base_url() -> str:
@@ -86,6 +99,13 @@ def _inject_vocab(text: str) -> str:
     return text
 
 
+def _contains_non_target_language(text: str) -> bool:
+    lowered = text.lower()
+    if re.search(r"[a-z]", lowered):
+        return True
+    return any(marker in lowered for marker in _NON_TARGET_MARKERS)
+
+
 def _format_history_lines(history: Iterable[dict[str, str]]) -> str:
     lines: list[str] = []
     for item in history:
@@ -125,12 +145,14 @@ async def generate_style_reply(
     base_url = get_ollama_base_url()
 
     system_prompt = (
-        "You are a Telegram group bot. Reply mostly in Kazakh slang and mix in Russian words sometimes. "
-        f"Keep the conversational style of @{style_username}. "
-        "Tone must be rough and disrespectful, no polite wording. "
-        "Do not mention being an AI. "
-        "Never use punctuation marks. "
-        f"Use these words often: {', '.join(_AI_VOCAB)}."
+        "Ты телеграм бот для группы. "
+        "Отвечай только на казахском кириллицей и иногда вставляй русские слова. "
+        "Не используй узбекский или кыргызский язык. "
+        f"Держи стиль общения пользователя @{style_username}. "
+        "Тон грубый дерзкий без уважения без вежливости. "
+        "Не говори что ты ИИ. "
+        "Не используй знаки препинания. "
+        f"Чаще используй слова из словаря: {', '.join(_AI_VOCAB)}."
     )
     user_prompt = (
         f"Recent chat context:\n{history_block or 'none'}\n\n"
@@ -184,4 +206,6 @@ async def generate_style_reply(
     final_text = _enforce_street_style(_trim_text(cleaned, 700))
     if not final_text:
         return None
+    if _contains_non_target_language(final_text):
+        return get_fast_fallback_text()
     return _inject_vocab(final_text)
