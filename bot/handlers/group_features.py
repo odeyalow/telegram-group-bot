@@ -73,7 +73,7 @@ _MEM_WAIT_RESPONSES = (
     "оп вот смешного чутка",
 )
 _PR_TRIGGERS = {"пр", "привет"}
-_AI_TRIGGER_PREFIXES = ("алдик ии", "ии алдик", "алдик ai", "ai алдик")
+_AI_NAME_TRIGGERS = {"алдик", "алдош", "одеяло", "алдияр"}
 _DO_IT_TRIGGER = "алдик делт неделт"
 _WHO_AM_I_TRIGGERS = {"алдик кто я", "алдик мен кммн"}
 _SAD_TRIGGERS_EXACT = {"алдик мен грусни", "алдик мен груснимн", "алдик груснимн"}
@@ -299,9 +299,9 @@ def _is_pr_trigger(normalized_text: str) -> bool:
 
 
 def _is_ai_trigger(message: Message, normalized_text: str, bot: Bot) -> bool:
-    for prefix in _AI_TRIGGER_PREFIXES:
-        if normalized_text == prefix or normalized_text.startswith(f"{prefix} "):
-            return True
+    tokens = normalized_text.split()
+    if any(token in _AI_NAME_TRIGGERS for token in tokens):
+        return True
 
     reply = message.reply_to_message
     if reply is None or reply.from_user is None:
@@ -310,11 +310,9 @@ def _is_ai_trigger(message: Message, normalized_text: str, bot: Bot) -> bool:
 
 
 def _extract_ai_user_prompt(message: Message, normalized_text: str) -> str:
-    for prefix in _AI_TRIGGER_PREFIXES:
-        if normalized_text == prefix:
-            return ""
-        if normalized_text.startswith(f"{prefix} "):
-            return normalized_text[len(prefix) :].strip()
+    tokens = normalized_text.split()
+    if tokens and tokens[0] in _AI_NAME_TRIGGERS:
+        return " ".join(tokens[1:]).strip()
 
     return (message.text or "").strip()
 
@@ -1046,6 +1044,20 @@ async def on_group_text(message: Message, bot: Bot) -> None:
     is_anon_link_request = _is_anon_link_request(normalized_text)
     is_aldik_name_trigger = _is_aldik_name_trigger(normalized_text)
     is_moderator_word = bool(_MODERATOR_PATTERN.search(text))
+    if is_ai_trigger and (
+        is_mem_photo_request
+        or is_mem_request
+        or is_paroshka_trigger
+        or is_em_trigger
+        or is_sad_trigger
+        or is_pr_trigger
+        or is_do_it_trigger
+        or is_who_am_i
+        or is_anon_link_request
+        or is_moderator_word
+    ):
+        # Keep existing special triggers higher priority than generic AI mention.
+        is_ai_trigger = False
     has_regular_trigger = (
         is_mem_photo_request
         or is_mem_request
@@ -1109,11 +1121,11 @@ async def on_group_text(message: Message, bot: Bot) -> None:
         if not prompt:
             prompt = "че думаешь по теме?"
 
-        history = get_recent_ai_messages(message.chat.id, limit=20)
+        history = get_recent_ai_messages(message.chat.id, limit=10)
         style_examples = get_recent_ai_messages_by_username(
             message.chat.id,
             ai_settings.ai_style_username,
-            limit=12,
+            limit=6,
         )
         reply_text = await generate_style_reply(
             user_message=prompt,

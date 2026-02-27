@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from typing import Iterable
 
 import aiohttp
@@ -17,6 +18,15 @@ def get_ollama_model() -> str:
     return (os.getenv("OLLAMA_MODEL") or "qwen2.5:1.5b").strip()
 
 
+def get_ai_max_tokens() -> int:
+    raw = (os.getenv("AI_MAX_TOKENS") or "64").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return 64
+    return max(24, min(value, 128))
+
+
 def _trim_text(value: str, limit: int) -> str:
     text = value.strip()
     if len(text) <= limit:
@@ -24,24 +34,32 @@ def _trim_text(value: str, limit: int) -> str:
     return text[: limit - 3].rstrip() + "..."
 
 
+def _enforce_street_style(text: str) -> str:
+    # Remove punctuation and keep rough chat style.
+    cleaned = re.sub(r"[^\w\s]", " ", text, flags=re.UNICODE)
+    cleaned = cleaned.replace("_", " ")
+    cleaned = " ".join(cleaned.split()).strip().lower()
+    return cleaned
+
+
 def _format_history_lines(history: Iterable[dict[str, str]]) -> str:
     lines: list[str] = []
     for item in history:
         username = (item.get("username") or "user").strip()
-        text = _trim_text(item.get("text") or "", 220)
+        text = _trim_text(item.get("text") or "", 180)
         if not text:
             continue
         lines.append(f"@{username}: {text}")
-    return "\n".join(lines[-18:])
+    return "\n".join(lines[-10:])
 
 
 def _format_style_examples(style_examples: Iterable[str]) -> str:
     lines: list[str] = []
     for text in style_examples:
-        trimmed = _trim_text(text, 140)
+        trimmed = _trim_text(text, 120)
         if trimmed:
             lines.append(f"- {trimmed}")
-    return "\n".join(lines[-12:])
+    return "\n".join(lines[-6:])
 
 
 async def generate_style_reply(
@@ -58,18 +76,21 @@ async def generate_style_reply(
     history_block = _format_history_lines(history)
     style_block = _format_style_examples(style_examples)
     model = get_ollama_model()
+    max_tokens = get_ai_max_tokens()
     base_url = get_ollama_base_url()
 
     system_prompt = (
-        "Ты телеграм-бот для группы. Отвечай коротко и по делу, "
-        f"в живом разговорном стиле пользователя @{style_username}. "
-        "Не упоминай, что ты ИИ."
+        "You are a Telegram group bot. Reply mostly in Kazakh slang and mix in Russian words sometimes. "
+        f"Keep the conversational style of @{style_username}. "
+        "Tone must be rough and disrespectful, no polite wording. "
+        "Do not mention being an AI. "
+        "Never use punctuation marks."
     )
     user_prompt = (
-        f"Контекст:\n{history_block or 'нет'}\n\n"
-        f"Примеры стиля @{style_username}:\n{style_block or 'пока нет'}\n\n"
-        f"Текущее сообщение:\n{_trim_text(clean_user_message, 400)}\n\n"
-        "Дай один краткий ответ в этом же стиле."
+        f"Recent chat context:\n{history_block or 'none'}\n\n"
+        f"Style examples of @{style_username}:\n{style_block or 'none'}\n\n"
+        f"Current user message:\n{_trim_text(clean_user_message, 280)}\n\n"
+        "Return one short reply in the same style."
     )
 
     payload = {
@@ -80,12 +101,14 @@ async def generate_style_reply(
             {"role": "user", "content": user_prompt},
         ],
         "options": {
-            "temperature": 0.8,
-            "num_predict": 96,
+            "temperature": 0.7,
+            "num_predict": max_tokens,
+            "num_ctx": 1024,
         },
+        "keep_alive": "30m",
     }
 
-    timeout = aiohttp.ClientTimeout(total=120)
+    timeout = aiohttp.ClientTimeout(total=90)
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(f"{base_url}/api/chat", json=payload) as response:
@@ -111,4 +134,7 @@ async def generate_style_reply(
     cleaned = str(content).strip()
     if not cleaned:
         return None
-    return _trim_text(cleaned, 700)
+    final_text = _enforce_street_style(_trim_text(cleaned, 700))
+    if not final_text:
+        return None
+    return final_text
