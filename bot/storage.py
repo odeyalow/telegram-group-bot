@@ -7,6 +7,7 @@ from time import time
 from uuid import uuid4
 
 _MEM_HISTORY_RETENTION_SECONDS = 45 * 24 * 60 * 60
+_AI_HISTORY_RETENTION_SECONDS = 30 * 24 * 60 * 60
 
 
 @dataclass(frozen=True)
@@ -17,6 +18,13 @@ class GroupSettings:
     moderator_trigger_enabled: bool
     anonymous_enabled: bool
     anonymous_token: str | None
+
+
+@dataclass(frozen=True)
+class AIGroupSettings:
+    chat_id: int
+    ai_enabled: bool
+    ai_style_username: str
 
 
 _db_path = Path("bot.db")
@@ -67,6 +75,39 @@ def init_storage(db_path: str) -> None:
             """
             CREATE INDEX IF NOT EXISTS idx_meme_history_chat_video
             ON meme_history(chat_id, video_id)
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ai_group_settings (
+                chat_id INTEGER PRIMARY KEY,
+                ai_enabled INTEGER NOT NULL DEFAULT 1,
+                ai_style_username TEXT NOT NULL DEFAULT 'odeyalow'
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ai_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                username TEXT NOT NULL DEFAULT '',
+                text TEXT NOT NULL,
+                sent_at INTEGER NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_ai_messages_chat_time
+            ON ai_messages(chat_id, sent_at)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_ai_messages_chat_user_time
+            ON ai_messages(chat_id, username, sent_at)
             """
         )
 
@@ -171,6 +212,155 @@ def set_anonymous_enabled(chat_id: int, enabled: bool) -> None:
             """,
             (int(enabled), chat_id),
         )
+
+
+def ensure_ai_group_settings(chat_id: int) -> AIGroupSettings:
+    ensure_group(chat_id)
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO ai_group_settings (chat_id, ai_enabled)
+            VALUES (?, 1)
+            """,
+            (chat_id,),
+        )
+
+    settings = get_ai_group_settings(chat_id)
+    if settings is None:
+        raise RuntimeError("Failed to initialize ai group settings")
+    return settings
+
+
+def get_ai_group_settings(chat_id: int) -> AIGroupSettings | None:
+    with _connect(row_factory=True) as conn:
+        row = conn.execute(
+            """
+            SELECT
+                chat_id,
+                ai_enabled,
+                ai_style_username
+            FROM ai_group_settings
+            WHERE chat_id = ?
+            """,
+            (chat_id,),
+        ).fetchone()
+
+    if row is None:
+        return None
+
+    return AIGroupSettings(
+        chat_id=int(row["chat_id"]),
+        ai_enabled=bool(row["ai_enabled"]),
+        ai_style_username=(row["ai_style_username"] or "odeyalow").strip() or "odeyalow",
+    )
+
+
+def set_ai_enabled(chat_id: int, enabled: bool) -> None:
+    ensure_ai_group_settings(chat_id)
+    with _connect() as conn:
+        conn.execute(
+            """
+            UPDATE ai_group_settings
+            SET ai_enabled = ?
+            WHERE chat_id = ?
+            """,
+            (int(enabled), chat_id),
+        )
+
+
+def set_ai_style_username(chat_id: int, username: str) -> None:
+    cleaned = username.strip().lstrip("@")
+    if not cleaned:
+        return
+
+    ensure_ai_group_settings(chat_id)
+    with _connect() as conn:
+        conn.execute(
+            """
+            UPDATE ai_group_settings
+            SET ai_style_username = ?
+            WHERE chat_id = ?
+            """,
+            (cleaned, chat_id),
+        )
+
+
+def add_ai_message(
+    chat_id: int,
+    user_id: int,
+    username: str,
+    text: str,
+    sent_at: int | None = None,
+) -> None:
+    payload = text.strip()
+    if not payload:
+        return
+
+    timestamp = int(sent_at if sent_at is not None else time())
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO ai_messages (chat_id, user_id, username, text, sent_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (chat_id, user_id, (username or "").strip(), payload, timestamp),
+        )
+        conn.execute(
+            """
+            DELETE FROM ai_messages
+            WHERE sent_at < ?
+            """,
+            (timestamp - _AI_HISTORY_RETENTION_SECONDS,),
+        )
+
+
+def get_recent_ai_messages(chat_id: int, limit: int = 30) -> list[dict[str, str]]:
+    safe_limit = max(1, min(limit, 80))
+    with _connect(row_factory=True) as conn:
+        rows = conn.execute(
+            """
+            SELECT user_id, username, text, sent_at
+            FROM ai_messages
+            WHERE chat_id = ?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (chat_id, safe_limit),
+        ).fetchall()
+
+    result: list[dict[str, str]] = []
+    for row in reversed(rows):
+        result.append(
+            {
+                "user_id": str(row["user_id"]),
+                "username": str(row["username"] or ""),
+                "text": str(row["text"] or ""),
+                "sent_at": str(row["sent_at"]),
+            }
+        )
+    return result
+
+
+def get_recent_ai_messages_by_username(chat_id: int, username: str, limit: int = 25) -> list[str]:
+    cleaned = username.strip().lstrip("@")
+    if not cleaned:
+        return []
+
+    safe_limit = max(1, min(limit, 60))
+    with _connect(row_factory=True) as conn:
+        rows = conn.execute(
+            """
+            SELECT text
+            FROM ai_messages
+            WHERE chat_id = ?
+              AND lower(username) = lower(?)
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (chat_id, cleaned, safe_limit),
+        ).fetchall()
+
+    return [str(row["text"] or "") for row in reversed(rows) if str(row["text"] or "").strip()]
 
 
 def ensure_anonymous_token(chat_id: int) -> str:

@@ -18,17 +18,24 @@ import aiohttp
 
 from aiogram import Bot, F, Router
 from aiogram.enums import ChatMemberStatus
-from aiogram.filters import Command
+from aiogram.filters import Command, CommandObject
 from aiogram.exceptions import TelegramAPIError
 from aiogram.types import BufferedInputFile, ChatMemberUpdated, FSInputFile, Message
 from aiogram.utils.deep_linking import create_start_link
 
+from bot.ai_service import generate_style_reply, get_ollama_base_url, get_ollama_model
 from bot.storage import (
     add_meme_history,
+    add_ai_message,
+    ensure_ai_group_settings,
     GroupSettings,
     ensure_anonymous_token,
     ensure_group,
+    get_recent_ai_messages,
+    get_recent_ai_messages_by_username,
     get_recent_meme_video_ids,
+    set_ai_enabled,
+    set_ai_style_username,
     set_anonymous_enabled,
     set_bot_enabled,
 )
@@ -51,6 +58,7 @@ _MEM_HISTORY_WINDOW_SECONDS = 30 * 24 * 60 * 60
 _seen_reply_messages: dict[tuple[str, int, int], float] = {}
 _yeuoia_reply_state: dict[tuple[int, int], tuple[int, int, float]] = {}
 _otn_paroshka_state: dict[int, tuple[int, int, float]] = {}
+_ai_reply_cooldowns: dict[int, float] = {}
 _MEM_WAIT_RESPONSES = (
     "болд болд родной ка бр миныт",
     "зяныыыым каз жберем",
@@ -65,6 +73,7 @@ _MEM_WAIT_RESPONSES = (
     "оп вот смешного чутка",
 )
 _PR_TRIGGERS = {"пр", "привет"}
+_AI_TRIGGER_PREFIXES = ("алдик ии", "ии алдик", "алдик ai", "ai алдик")
 _DO_IT_TRIGGER = "алдик делт неделт"
 _WHO_AM_I_TRIGGERS = {"алдик кто я", "алдик мен кммн"}
 _SAD_TRIGGERS_EXACT = {"алдик мен грусни", "алдик мен груснимн", "алдик груснимн"}
@@ -73,6 +82,7 @@ _YEUOIA_USERNAME = "yeuoia"
 _ODEYALOW_USERNAME = "odeyalow"
 _YEUOIA_REPLY_STATE_TTL_SECONDS = 24 * 60 * 60
 _OTN_PAROSHKA_STATE_TTL_SECONDS = 24 * 60 * 60
+_AI_REPLY_COOLDOWN_SECONDS = 15
 _INSTA_USERNAMES = ("aramems", "wasteprod")
 _SAD_INSTA_USERNAME = "famouszayo"
 _INSTA_POSTS_ENDPOINT = "https://inflact.com/downloader/api/viewer/posts/"
@@ -286,6 +296,41 @@ def _is_sad_trigger(normalized_text: str) -> bool:
 def _is_pr_trigger(normalized_text: str) -> bool:
     tokens = normalized_text.split()
     return any(token in _PR_TRIGGERS for token in tokens)
+
+
+def _is_ai_trigger(message: Message, normalized_text: str, bot: Bot) -> bool:
+    for prefix in _AI_TRIGGER_PREFIXES:
+        if normalized_text == prefix or normalized_text.startswith(f"{prefix} "):
+            return True
+
+    reply = message.reply_to_message
+    if reply is None or reply.from_user is None:
+        return False
+    return reply.from_user.is_bot and reply.from_user.id == bot.id
+
+
+def _extract_ai_user_prompt(message: Message, normalized_text: str) -> str:
+    for prefix in _AI_TRIGGER_PREFIXES:
+        if normalized_text == prefix:
+            return ""
+        if normalized_text.startswith(f"{prefix} "):
+            return normalized_text[len(prefix) :].strip()
+
+    return (message.text or "").strip()
+
+
+def _normalize_username(value: str) -> str:
+    cleaned = value.strip().lstrip("@")
+    return re.sub(r"[^a-zA-Z0-9_]", "", cleaned)
+
+
+def _should_reply_with_ai(chat_id: int) -> bool:
+    now = monotonic()
+    last = _ai_reply_cooldowns.get(chat_id, 0.0)
+    if now - last < _AI_REPLY_COOLDOWN_SECONDS:
+        return False
+    _ai_reply_cooldowns[chat_id] = now
+    return True
 
 
 def _is_yeuoia_user(message: Message) -> bool:
@@ -907,6 +952,61 @@ async def anon_link(message: Message, bot: Bot) -> None:
     await _send_anonymous_link(message, bot)
 
 
+@router.message(F.chat.type.in_(_GROUP_CHAT_TYPES), Command("ai_on"))
+async def ai_on(message: Message, bot: Bot) -> None:
+    ensure_group(message.chat.id, message.chat.title or "")
+    if not await _require_admin(message, bot):
+        return
+
+    ensure_ai_group_settings(message.chat.id)
+    set_ai_enabled(message.chat.id, True)
+    await message.answer("ИИ режим кослды. Триггер: алдик ии <сурак> или реплай на ботты хабар.")
+
+
+@router.message(F.chat.type.in_(_GROUP_CHAT_TYPES), Command("ai_off"))
+async def ai_off(message: Message, bot: Bot) -> None:
+    ensure_group(message.chat.id, message.chat.title or "")
+    if not await _require_admin(message, bot):
+        return
+
+    ensure_ai_group_settings(message.chat.id)
+    set_ai_enabled(message.chat.id, False)
+    await message.answer("ИИ режим ошрлды.")
+
+
+@router.message(F.chat.type.in_(_GROUP_CHAT_TYPES), Command("ai_style"))
+async def ai_style(message: Message, command: CommandObject, bot: Bot) -> None:
+    ensure_group(message.chat.id, message.chat.title or "")
+    if not await _require_admin(message, bot):
+        return
+
+    raw = (command.args or "").strip()
+    username = _normalize_username(raw)
+    if not username:
+        await message.answer("Колдану: /ai_style @username")
+        return
+
+    ensure_ai_group_settings(message.chat.id)
+    set_ai_style_username(message.chat.id, username)
+    await message.answer(f"ИИ стилы енды @{username} болд.")
+
+
+@router.message(F.chat.type.in_(_GROUP_CHAT_TYPES), Command("ai_status"))
+async def ai_status(message: Message, bot: Bot) -> None:
+    ensure_group(message.chat.id, message.chat.title or "")
+    if not await _require_admin(message, bot):
+        return
+
+    ai_settings = ensure_ai_group_settings(message.chat.id)
+    state = "вкл" if ai_settings.ai_enabled else "выкл"
+    await message.answer(
+        f"ИИ статус: {state}\n"
+        f"Стиль: @{ai_settings.ai_style_username}\n"
+        f"Модель: {get_ollama_model()}\n"
+        f"Ollama: {get_ollama_base_url()}"
+    )
+
+
 @router.my_chat_member(F.chat.type.in_(_GROUP_CHAT_TYPES))
 async def on_bot_added(event: ChatMemberUpdated, bot: Bot) -> None:
     old_status = event.old_chat_member.status
@@ -924,6 +1024,12 @@ async def on_group_text(message: Message, bot: Bot) -> None:
         return
 
     text = message.text or ""
+    author_username = (
+        message.from_user.username
+        or message.from_user.full_name
+        or f"user_{message.from_user.id}"
+    )
+    add_ai_message(message.chat.id, message.from_user.id, author_username, text)
 
     normalized_text = _normalize_text(text)
     is_mem_photo_request = _is_mem_photo_request(normalized_text)
@@ -933,6 +1039,7 @@ async def on_group_text(message: Message, bot: Bot) -> None:
     is_em_trigger = _is_em_trigger(normalized_text)
     is_sad_trigger = _is_sad_trigger(normalized_text)
     is_pr_trigger = _is_pr_trigger(normalized_text)
+    is_ai_trigger = _is_ai_trigger(message, normalized_text, bot)
     is_do_it_trigger = normalized_text == _DO_IT_TRIGGER
     is_yeuoia_reply_to_odeyalow = _is_yeuoia_reply_to_odeyalow(message)
     is_who_am_i = normalized_text in _WHO_AM_I_TRIGGERS
@@ -946,6 +1053,7 @@ async def on_group_text(message: Message, bot: Bot) -> None:
         or is_em_trigger
         or is_sad_trigger
         or is_pr_trigger
+        or is_ai_trigger
         or is_do_it_trigger
         or is_who_am_i
         or is_anon_link_request
@@ -968,6 +1076,8 @@ async def on_group_text(message: Message, bot: Bot) -> None:
         kind = "sad_trigger"
     elif is_pr_trigger:
         kind = "pr_trigger"
+    elif is_ai_trigger:
+        kind = "ai_trigger"
     elif is_do_it_trigger:
         kind = "do_it_trigger"
     elif is_who_am_i:
@@ -986,6 +1096,35 @@ async def on_group_text(message: Message, bot: Bot) -> None:
 
     settings = ensure_group(message.chat.id, message.chat.title or "")
     if not settings.bot_enabled:
+        return
+
+    ai_settings = ensure_ai_group_settings(message.chat.id)
+    if is_ai_trigger:
+        if not ai_settings.ai_enabled:
+            return
+        if not _should_reply_with_ai(message.chat.id):
+            return
+
+        prompt = _extract_ai_user_prompt(message, normalized_text)
+        if not prompt:
+            prompt = "че думаешь по теме?"
+
+        history = get_recent_ai_messages(message.chat.id, limit=40)
+        style_examples = get_recent_ai_messages_by_username(
+            message.chat.id,
+            ai_settings.ai_style_username,
+            limit=25,
+        )
+        reply_text = await generate_style_reply(
+            user_message=prompt,
+            style_username=ai_settings.ai_style_username,
+            history=history,
+            style_examples=style_examples,
+        )
+        if reply_text:
+            await message.reply(reply_text)
+        else:
+            await message.reply("ИИ ща не але, позже еще жаз.")
         return
 
     should_reply_to_yeuoia = False

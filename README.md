@@ -21,7 +21,31 @@ python -m bot.main
 ```env
 BOT_TOKEN=your_telegram_bot_token
 BOT_DB_PATH=bot.db
+OLLAMA_BASE_URL=http://127.0.0.1:11434
+OLLAMA_MODEL=qwen2.5:7b
 ```
+
+## Локальный ИИ (бесплатно)
+
+Используется локальный `Ollama` без платного API.
+
+1. Установи Ollama на сервер.
+2. Загрузи модель:
+
+```bash
+ollama pull qwen2.5:7b
+```
+
+3. Запусти сервис Ollama (обычно стартует автоматически).
+4. В группе команды для админов:
+   - `/ai_on`
+   - `/ai_off`
+   - `/ai_style @username`
+   - `/ai_status`
+
+Триггеры ИИ:
+- `алдик ии <текст>`
+- реплай на сообщение бота
 
 ## Команды в группе
 
