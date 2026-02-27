@@ -1109,11 +1109,11 @@ async def on_group_text(message: Message, bot: Bot) -> None:
         if not prompt:
             prompt = "че думаешь по теме?"
 
-        history = get_recent_ai_messages(message.chat.id, limit=40)
+        history = get_recent_ai_messages(message.chat.id, limit=20)
         style_examples = get_recent_ai_messages_by_username(
             message.chat.id,
             ai_settings.ai_style_username,
-            limit=25,
+            limit=12,
         )
         reply_text = await generate_style_reply(
             user_message=prompt,

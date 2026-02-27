@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import logging
 import os
 from typing import Iterable
 
 import aiohttp
+
+logger = logging.getLogger(__name__)
 
 
 def get_ollama_base_url() -> str:
@@ -11,7 +14,7 @@ def get_ollama_base_url() -> str:
 
 
 def get_ollama_model() -> str:
-    return (os.getenv("OLLAMA_MODEL") or "qwen2.5:7b").strip()
+    return (os.getenv("OLLAMA_MODEL") or "qwen2.5:1.5b").strip()
 
 
 def _trim_text(value: str, limit: int) -> str:
@@ -25,20 +28,20 @@ def _format_history_lines(history: Iterable[dict[str, str]]) -> str:
     lines: list[str] = []
     for item in history:
         username = (item.get("username") or "user").strip()
-        text = _trim_text(item.get("text") or "", 280)
+        text = _trim_text(item.get("text") or "", 220)
         if not text:
             continue
         lines.append(f"@{username}: {text}")
-    return "\n".join(lines[-30:])
+    return "\n".join(lines[-18:])
 
 
 def _format_style_examples(style_examples: Iterable[str]) -> str:
     lines: list[str] = []
     for text in style_examples:
-        trimmed = _trim_text(text, 180)
+        trimmed = _trim_text(text, 140)
         if trimmed:
             lines.append(f"- {trimmed}")
-    return "\n".join(lines[-20:])
+    return "\n".join(lines[-12:])
 
 
 async def generate_style_reply(
@@ -58,16 +61,15 @@ async def generate_style_reply(
     base_url = get_ollama_base_url()
 
     system_prompt = (
-        "Ты чат-бот для Telegram группы. Отвечай в стиле живого человека, "
-        f"подражая манере пользователя @{style_username}. "
-        "Пиши коротко, разговорно, естественно. Не говори, что ты ИИ. "
-        "Если вопрос требует конкретики, отвечай по сути."
+        "Ты телеграм-бот для группы. Отвечай коротко и по делу, "
+        f"в живом разговорном стиле пользователя @{style_username}. "
+        "Не упоминай, что ты ИИ."
     )
     user_prompt = (
-        f"Контекст чата:\n{history_block or 'нет контекста'}\n\n"
-        f"Примеры стиля @{style_username}:\n{style_block or 'примеров пока нет'}\n\n"
-        f"Сообщение пользователя:\n{_trim_text(clean_user_message, 500)}\n\n"
-        "Сделай один ответ в похожем стиле."
+        f"Контекст:\n{history_block or 'нет'}\n\n"
+        f"Примеры стиля @{style_username}:\n{style_block or 'пока нет'}\n\n"
+        f"Текущее сообщение:\n{_trim_text(clean_user_message, 400)}\n\n"
+        "Дай один краткий ответ в этом же стиле."
     )
 
     payload = {
@@ -78,19 +80,27 @@ async def generate_style_reply(
             {"role": "user", "content": user_prompt},
         ],
         "options": {
-            "temperature": 0.9,
-            "num_predict": 180,
+            "temperature": 0.8,
+            "num_predict": 96,
         },
     }
 
-    timeout = aiohttp.ClientTimeout(total=45)
+    timeout = aiohttp.ClientTimeout(total=120)
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(f"{base_url}/api/chat", json=payload) as response:
                 if response.status != 200:
+                    body = _trim_text(await response.text(), 260)
+                    logger.warning(
+                        "Ollama /api/chat failed: status=%s model=%s body=%s",
+                        response.status,
+                        model,
+                        body,
+                    )
                     return None
                 data = await response.json()
-    except (aiohttp.ClientError, aiohttp.ContentTypeError, TimeoutError):
+    except (aiohttp.ClientError, aiohttp.ContentTypeError, TimeoutError) as exc:
+        logger.warning("Ollama request failed: model=%s error=%s", model, exc)
         return None
 
     content = (
@@ -101,4 +111,4 @@ async def generate_style_reply(
     cleaned = str(content).strip()
     if not cleaned:
         return None
-    return _trim_text(cleaned, 900)
+    return _trim_text(cleaned, 700)
