@@ -2,10 +2,12 @@
 
 import asyncio
 import base64
+from contextlib import suppress
 import hashlib
 import hmac
 import json
 import logging
+import os
 from pathlib import Path
 import re
 import secrets
@@ -17,13 +19,18 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 import aiohttp
 
 from aiogram import Bot, F, Router
-from aiogram.enums import ChatMemberStatus
+from aiogram.enums import ChatAction, ChatMemberStatus
 from aiogram.filters import Command, CommandObject
 from aiogram.exceptions import TelegramAPIError
 from aiogram.types import BufferedInputFile, ChatMemberUpdated, FSInputFile, Message
 from aiogram.utils.deep_linking import create_start_link
 
-from bot.ai_service import generate_style_reply, get_ollama_base_url, get_ollama_model
+from bot.ai_service import (
+    generate_style_reply,
+    get_fast_fallback_text,
+    get_ollama_base_url,
+    get_ollama_model,
+)
 from bot.storage import (
     add_meme_history,
     add_ai_message,
@@ -48,6 +55,15 @@ from bot.texts import (
 
 router = Router()
 logger = logging.getLogger(__name__)
+
+
+def _safe_int_env(name: str, default: int, low: int, high: int) -> int:
+    raw = (os.getenv(name) or str(default)).strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        value = default
+    return max(low, min(value, high))
 
 _GROUP_CHAT_TYPES = {"group", "supergroup"}
 _MODERATOR_PATTERN = re.compile(r"\bмодер(?:атор)?\b", re.IGNORECASE)
@@ -82,7 +98,8 @@ _YEUOIA_USERNAME = "yeuoia"
 _ODEYALOW_USERNAME = "odeyalow"
 _YEUOIA_REPLY_STATE_TTL_SECONDS = 24 * 60 * 60
 _OTN_PAROSHKA_STATE_TTL_SECONDS = 24 * 60 * 60
-_AI_REPLY_COOLDOWN_SECONDS = 15
+_AI_REPLY_COOLDOWN_SECONDS = 5
+_AI_FAST_REPLY_TIMEOUT_SECONDS = _safe_int_env("AI_FAST_REPLY_TIMEOUT_SECONDS", 7, 3, 20)
 _INSTA_USERNAMES = ("aramems", "wasteprod")
 _SAD_INSTA_USERNAME = "famouszayo"
 _INSTA_POSTS_ENDPOINT = "https://inflact.com/downloader/api/viewer/posts/"
@@ -329,6 +346,15 @@ def _should_reply_with_ai(chat_id: int) -> bool:
         return False
     _ai_reply_cooldowns[chat_id] = now
     return True
+
+
+async def _typing_status_worker(bot: Bot, chat_id: int) -> None:
+    while True:
+        try:
+            await bot.send_chat_action(chat_id, ChatAction.TYPING)
+        except TelegramAPIError:
+            return
+        await asyncio.sleep(2.0)
 
 
 def _is_yeuoia_user(message: Message) -> bool:
@@ -1127,16 +1153,29 @@ async def on_group_text(message: Message, bot: Bot) -> None:
             ai_settings.ai_style_username,
             limit=3,
         )
-        reply_text = await generate_style_reply(
-            user_message=prompt,
-            style_username=ai_settings.ai_style_username,
-            history=history,
-            style_examples=style_examples,
-        )
+        typing_task = asyncio.create_task(_typing_status_worker(bot, message.chat.id))
+        try:
+            try:
+                reply_text = await asyncio.wait_for(
+                    generate_style_reply(
+                        user_message=prompt,
+                        style_username=ai_settings.ai_style_username,
+                        history=history,
+                        style_examples=style_examples,
+                    ),
+                    timeout=_AI_FAST_REPLY_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                reply_text = get_fast_fallback_text()
+        finally:
+            typing_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await typing_task
+
         if reply_text:
             await message.reply(reply_text)
         else:
-            await message.reply("ИИ ща не але, позже еще жаз.")
+            await message.reply(get_fast_fallback_text())
         return
 
     should_reply_to_yeuoia = False

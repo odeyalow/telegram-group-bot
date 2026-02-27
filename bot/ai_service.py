@@ -2,12 +2,34 @@ from __future__ import annotations
 
 import logging
 import os
+from random import choice, random
 import re
 from typing import Iterable
 
 import aiohttp
 
 logger = logging.getLogger(__name__)
+_AI_VOCAB = (
+    "натуре",
+    "натури",
+    "каям",
+    "каям жемеш",
+    "шша",
+    "ищщщаааа",
+    "мал",
+    "чорт",
+    "шша мал",
+    "базар жок",
+    "дану гульбану",
+    "дану насмерть",
+    "какие дела",
+    "алдик чотам на месте",
+    "мен сены жаксы корем",
+    "аузнды жапшы",
+    "жапшы аузнды",
+    "рот закрой",
+    "щенок",
+)
 
 
 def get_ollama_base_url() -> str:
@@ -36,6 +58,10 @@ def get_ai_timeout_seconds() -> int:
     return max(10, min(value, 120))
 
 
+def get_fast_fallback_text() -> str:
+    return choice(_AI_VOCAB)
+
+
 def _trim_text(value: str, limit: int) -> str:
     text = value.strip()
     if len(text) <= limit:
@@ -49,6 +75,15 @@ def _enforce_street_style(text: str) -> str:
     cleaned = cleaned.replace("_", " ")
     cleaned = " ".join(cleaned.split()).strip().lower()
     return cleaned
+
+
+def _inject_vocab(text: str) -> str:
+    lowered = text.lower()
+    if any(word in lowered for word in _AI_VOCAB):
+        return text
+    if random() < 0.7:
+        return f"{text} {choice(_AI_VOCAB)}".strip()
+    return text
 
 
 def _format_history_lines(history: Iterable[dict[str, str]]) -> str:
@@ -94,7 +129,8 @@ async def generate_style_reply(
         f"Keep the conversational style of @{style_username}. "
         "Tone must be rough and disrespectful, no polite wording. "
         "Do not mention being an AI. "
-        "Never use punctuation marks."
+        "Never use punctuation marks. "
+        f"Use these words often: {', '.join(_AI_VOCAB)}."
     )
     user_prompt = (
         f"Recent chat context:\n{history_block or 'none'}\n\n"
@@ -148,4 +184,4 @@ async def generate_style_reply(
     final_text = _enforce_street_style(_trim_text(cleaned, 700))
     if not final_text:
         return None
-    return final_text
+    return _inject_vocab(final_text)
