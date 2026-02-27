@@ -23,6 +23,8 @@ BOT_TOKEN=your_telegram_bot_token
 BOT_DB_PATH=bot.db
 OLLAMA_BASE_URL=http://127.0.0.1:11434
 OLLAMA_MODEL=qwen2.5:7b
+AI_MAX_TOKENS=32
+AI_TIMEOUT_SECONDS=45
 ```
 
 ## Локальный ИИ (бесплатно)

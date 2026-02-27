@@ -19,12 +19,21 @@ def get_ollama_model() -> str:
 
 
 def get_ai_max_tokens() -> int:
-    raw = (os.getenv("AI_MAX_TOKENS") or "64").strip()
+    raw = (os.getenv("AI_MAX_TOKENS") or "32").strip()
     try:
         value = int(raw)
     except ValueError:
-        return 64
-    return max(24, min(value, 128))
+        return 32
+    return max(12, min(value, 96))
+
+
+def get_ai_timeout_seconds() -> int:
+    raw = (os.getenv("AI_TIMEOUT_SECONDS") or "45").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return 45
+    return max(10, min(value, 120))
 
 
 def _trim_text(value: str, limit: int) -> str:
@@ -46,20 +55,20 @@ def _format_history_lines(history: Iterable[dict[str, str]]) -> str:
     lines: list[str] = []
     for item in history:
         username = (item.get("username") or "user").strip()
-        text = _trim_text(item.get("text") or "", 180)
+        text = _trim_text(item.get("text") or "", 120)
         if not text:
             continue
         lines.append(f"@{username}: {text}")
-    return "\n".join(lines[-10:])
+    return "\n".join(lines[-4:])
 
 
 def _format_style_examples(style_examples: Iterable[str]) -> str:
     lines: list[str] = []
     for text in style_examples:
-        trimmed = _trim_text(text, 120)
+        trimmed = _trim_text(text, 90)
         if trimmed:
             lines.append(f"- {trimmed}")
-    return "\n".join(lines[-6:])
+    return "\n".join(lines[-3:])
 
 
 async def generate_style_reply(
@@ -77,6 +86,7 @@ async def generate_style_reply(
     style_block = _format_style_examples(style_examples)
     model = get_ollama_model()
     max_tokens = get_ai_max_tokens()
+    timeout_seconds = get_ai_timeout_seconds()
     base_url = get_ollama_base_url()
 
     system_prompt = (
@@ -89,7 +99,7 @@ async def generate_style_reply(
     user_prompt = (
         f"Recent chat context:\n{history_block or 'none'}\n\n"
         f"Style examples of @{style_username}:\n{style_block or 'none'}\n\n"
-        f"Current user message:\n{_trim_text(clean_user_message, 280)}\n\n"
+        f"Current user message:\n{_trim_text(clean_user_message, 160)}\n\n"
         "Return one short reply in the same style."
     )
 
@@ -101,14 +111,15 @@ async def generate_style_reply(
             {"role": "user", "content": user_prompt},
         ],
         "options": {
-            "temperature": 0.7,
+            "temperature": 0.6,
             "num_predict": max_tokens,
-            "num_ctx": 1024,
+            "num_ctx": 512,
+            "top_k": 20,
         },
         "keep_alive": "30m",
     }
 
-    timeout = aiohttp.ClientTimeout(total=90)
+    timeout = aiohttp.ClientTimeout(total=timeout_seconds)
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(f"{base_url}/api/chat", json=payload) as response:
